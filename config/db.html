@@ -1,0 +1,39 @@
+<?php
+// ============================================================
+// Database Configuration
+// Reads from db_config.php (local) or environment variables
+// ============================================================
+
+$configFile = __DIR__ . '/db_config.php';
+if (file_exists($configFile)) {
+    require_once $configFile;
+} else {
+    // Fallback to environment variables (for Railway / other cloud hosts)
+    define('DB_HOST',    getenv('DB_HOST')    ?: 'localhost');
+    define('DB_NAME',    getenv('DB_NAME')    ?: 'school_db');
+    define('DB_USER',    getenv('DB_USER')    ?: 'root');
+    define('DB_PASS',    getenv('DB_PASS')    ?: '');
+    define('DB_CHARSET', getenv('DB_CHARSET') ?: 'utf8mb4');
+}
+
+function getDB() {
+    static $pdo = null;
+    if ($pdo === null) {
+        $dsn = "mysql:host=" . DB_HOST . ";dbname=" . DB_NAME . ";charset=" . DB_CHARSET;
+        $options = [
+            PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            PDO::ATTR_EMULATE_PREPARES   => false,
+        ];
+        try {
+            $pdo = new PDO($dsn, DB_USER, DB_PASS, $options);
+        } catch (PDOException $e) {
+            die('<div style="font-family:sans-serif;padding:2rem;background:#1a1a2e;color:#ff6b6b;text-align:center;">
+                <h2>⚠️ Database Connection Failed</h2>
+                <p>Please check your <code>config/db_config.php</code> credentials.</p>
+                <small>' . htmlspecialchars($e->getMessage()) . '</small>
+            </div>');
+        }
+    }
+    return $pdo;
+}
