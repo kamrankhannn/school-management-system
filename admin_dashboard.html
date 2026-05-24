@@ -1,0 +1,770 @@
+<?php
+session_start();
+require_once 'config/db.php';
+
+// Auth guard
+if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'admin') {
+    header('Location: login.php'); exit;
+}
+
+$db = getDB();
+
+// Handle action messages
+$msg = '';
+$msgType = 'success';
+if (isset($_GET['msg'])) {
+    $msgs = [
+        'student_added'   => 'Student added successfully.',
+        'student_deleted' => 'Student deleted.',
+        'teacher_added'   => 'Teacher added successfully.',
+        'teacher_deleted' => 'Teacher deleted.',
+        'class_added'     => 'Class created.',
+        'notice_added'    => 'Notice posted.',
+        'user_deleted'    => 'User deleted.',
+    ];
+    $msg = $msgs[$_GET['msg']] ?? '';
+}
+if (isset($_GET['err'])) {
+    $msgType = 'error';
+    $errs = [
+        'email_exists' => 'Email already registered.',
+        'invalid'      => 'Invalid request.',
+    ];
+    $msg = $errs[$_GET['err']] ?? 'An error occurred.';
+}
+
+// ---- Stats ------------------------------------------------
+$totalStudents  = $db->query("SELECT COUNT(*) FROM students")->fetchColumn();
+$totalTeachers  = $db->query("SELECT COUNT(*) FROM teachers")->fetchColumn();
+$totalClasses   = $db->query("SELECT COUNT(*) FROM classes")->fetchColumn();
+$totalUsers     = $db->query("SELECT COUNT(*) FROM users")->fetchColumn();
+$totalNotices   = $db->query("SELECT COUNT(*) FROM notices")->fetchColumn();
+
+// Attendance today
+$today = date('Y-m-d');
+$presentToday = $db->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND status = 'present'");
+$presentToday->execute([$today]);
+$presentToday = $presentToday->fetchColumn();
+
+// ---- Section routing -----------------------------------------------
+$section = $_GET['section'] ?? 'dashboard';
+
+// ---- Students list
+$students = $db->query(
+    "SELECT u.id, u.full_name, u.email, u.status, s.roll_number, s.phone,
+            CONCAT(c.class_name, ' ', c.section) AS class_name
+     FROM users u
+     JOIN students s ON s.user_id = u.id
+     LEFT JOIN classes c ON c.id = s.class_id
+     ORDER BY u.created_at DESC"
+)->fetchAll();
+
+// ---- Teachers list
+$teachers = $db->query(
+    "SELECT u.id, u.full_name, u.email, u.status, t.employee_id, t.subject, t.phone, t.qualification
+     FROM users u
+     JOIN teachers t ON t.user_id = u.id
+     ORDER BY u.created_at DESC"
+)->fetchAll();
+
+// ---- Classes list
+$classes = $db->query(
+    "SELECT c.id, c.class_name, c.section, u.full_name AS teacher_name,
+            (SELECT COUNT(*) FROM students WHERE class_id = c.id) AS student_count
+     FROM classes c
+     LEFT JOIN users u ON u.id = c.teacher_id
+     ORDER BY c.class_name"
+)->fetchAll();
+
+// ---- Subjects list
+$subjects = $db->query(
+    "SELECT sub.id, sub.subject_name, CONCAT(c.class_name,' ',c.section) AS class_name, u.full_name AS teacher_name
+     FROM subjects sub
+     JOIN classes c ON c.id = sub.class_id
+     LEFT JOIN users u ON u.id = sub.teacher_id
+     ORDER BY sub.subject_name"
+)->fetchAll();
+
+// ---- Notices
+$notices = $db->query(
+    "SELECT n.*, u.full_name AS posted_by_name FROM notices n JOIN users u ON u.id = n.posted_by ORDER BY n.created_at DESC"
+)->fetchAll();
+
+// ---- Attendance overview
+$attendanceRecords = $db->query(
+    "SELECT a.date, a.status, u.full_name, s.roll_number,
+            CONCAT(c.class_name,' ',c.section) AS class_name
+     FROM attendance a
+     JOIN students st ON st.id = a.student_id
+     JOIN users u ON u.id = st.user_id
+     JOIN classes c ON c.id = a.class_id
+     LEFT JOIN students s ON s.user_id = u.id
+     ORDER BY a.date DESC, u.full_name LIMIT 100"
+)->fetchAll();
+
+// ---- Grades overview
+$gradesOverview = $db->query(
+    "SELECT g.*, u.full_name AS student_name, sub.subject_name, s.roll_number
+     FROM grades g
+     JOIN students st ON st.id = g.student_id
+     JOIN users u ON u.id = st.user_id
+     LEFT JOIN students s ON s.user_id = u.id
+     JOIN subjects sub ON sub.id = g.subject_id
+     ORDER BY g.created_at DESC LIMIT 100"
+)->fetchAll();
+
+// ---- Teachers list for dropdowns
+$teachersList = $db->query("SELECT u.id, u.full_name FROM users u WHERE u.role = 'teacher' ORDER BY u.full_name")->fetchAll();
+$classesList  = $db->query("SELECT id, class_name, section FROM classes ORDER BY class_name")->fetchAll();
+
+$pageTitle = 'Admin Dashboard';
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Admin Dashboard - EduTrack School Management System">
+    <title>Admin Dashboard | EduTrack SMS</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet">
+    <link href="css/style.css" rel="stylesheet">
+</head>
+<body>
+<div class="app-wrapper">
+    <?php require_once 'includes/sidebar.php'; ?>
+
+    <div class="main-content">
+        <!-- Top Header -->
+        <header class="top-header">
+            <div style="display:flex;align-items:center;gap:1rem;">
+                <button class="sidebar-toggle" id="sidebarToggle"><i class="fa-solid fa-bars"></i></button>
+                <div class="page-title-header">
+                    <?= $section === 'dashboard' ? 'Dashboard Overview' : ucfirst($section) . ' Management' ?>
+                    <span>EduTrack School Management System</span>
+                </div>
+            </div>
+            <div class="header-actions">
+                <div class="header-badge">
+                    <i class="fa-solid fa-bell"></i>
+                    <span class="badge-dot"></span>
+                </div>
+                <a href="logout.php" class="header-badge" title="Logout">
+                    <i class="fa-solid fa-right-from-bracket"></i>
+                </a>
+            </div>
+        </header>
+
+        <div class="page-body">
+
+            <!-- Alert -->
+            <?php if ($msg): ?>
+            <div class="alert-glass alert-<?= $msgType ?>" data-autodismiss="4000">
+                <i class="fa-solid fa-<?= $msgType === 'success' ? 'circle-check' : 'circle-exclamation' ?>"></i>
+                <?= htmlspecialchars($msg) ?>
+            </div>
+            <?php endif; ?>
+
+            <!-- ===================================================
+                 SECTION: DASHBOARD
+                 =================================================== -->
+            <?php if ($section === 'dashboard'): ?>
+
+            <!-- Stat Cards -->
+            <div class="stat-cards-grid">
+                <div class="stat-card">
+                    <div class="stat-info">
+                        <div class="stat-value" data-count="<?= $totalStudents ?>"><?= $totalStudents ?></div>
+                        <div class="stat-label">Total Students</div>
+                        <div class="stat-change up"><i class="fa-solid fa-arrow-up"></i> Active Enrollments</div>
+                    </div>
+                    <div class="stat-icon-wrap purple"><i class="fa-solid fa-user-graduate"></i></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-info">
+                        <div class="stat-value" data-count="<?= $totalTeachers ?>"><?= $totalTeachers ?></div>
+                        <div class="stat-label">Total Teachers</div>
+                        <div class="stat-change up"><i class="fa-solid fa-arrow-up"></i> On Faculty</div>
+                    </div>
+                    <div class="stat-icon-wrap cyan"><i class="fa-solid fa-chalkboard-user"></i></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-info">
+                        <div class="stat-value" data-count="<?= $totalClasses ?>"><?= $totalClasses ?></div>
+                        <div class="stat-label">Total Classes</div>
+                        <div class="stat-change up"><i class="fa-solid fa-arrow-up"></i> Active Sessions</div>
+                    </div>
+                    <div class="stat-icon-wrap pink"><i class="fa-solid fa-building-columns"></i></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-info">
+                        <div class="stat-value" data-count="<?= $presentToday ?>"><?= $presentToday ?></div>
+                        <div class="stat-label">Present Today</div>
+                        <div class="stat-change up"><i class="fa-solid fa-calendar-day"></i> <?= date('M d, Y') ?></div>
+                    </div>
+                    <div class="stat-icon-wrap green"><i class="fa-solid fa-clipboard-check"></i></div>
+                </div>
+            </div>
+
+            <!-- Quick Access + Notices -->
+            <div class="grid-2" style="margin-bottom:1.5rem;">
+                <!-- Quick Actions -->
+                <div class="glass-card">
+                    <div class="card-header-glass">
+                        <div class="card-title"><i class="fa-solid fa-bolt"></i> Quick Actions</div>
+                    </div>
+                    <div class="card-body-glass">
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;">
+                            <a href="?section=students" class="btn-secondary-glow" style="justify-content:center;padding:0.9rem;flex-direction:column;gap:0.4rem;text-align:center;">
+                                <i class="fa-solid fa-user-graduate fa-lg"></i>
+                                <span>Manage Students</span>
+                            </a>
+                            <a href="?section=teachers" class="btn-secondary-glow" style="justify-content:center;padding:0.9rem;flex-direction:column;gap:0.4rem;text-align:center;border-color:rgba(255,107,157,0.3);color:var(--accent);background:rgba(255,107,157,0.08);">
+                                <i class="fa-solid fa-chalkboard-user fa-lg"></i>
+                                <span>Manage Teachers</span>
+                            </a>
+                            <a href="?section=classes" class="btn-success-glow" style="justify-content:center;padding:0.9rem;flex-direction:column;gap:0.4rem;text-align:center;">
+                                <i class="fa-solid fa-building-columns fa-lg"></i>
+                                <span>Classes</span>
+                            </a>
+                            <a href="?section=notices" class="btn-secondary-glow" style="justify-content:center;padding:0.9rem;flex-direction:column;gap:0.4rem;text-align:center;border-color:rgba(255,179,71,0.3);color:var(--warning);background:rgba(255,179,71,0.08);">
+                                <i class="fa-solid fa-bullhorn fa-lg"></i>
+                                <span>Post Notice</span>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Notices -->
+                <div class="glass-card">
+                    <div class="card-header-glass">
+                        <div class="card-title"><i class="fa-solid fa-bullhorn"></i> Recent Notices</div>
+                        <a href="?section=notices" class="btn-secondary-glow btn-sm">View All</a>
+                    </div>
+                    <div class="card-body-glass">
+                        <?php if (empty($notices)): ?>
+                        <p style="color:var(--text-muted);font-size:0.85rem;">No notices posted yet.</p>
+                        <?php else: ?>
+                        <?php foreach (array_slice($notices, 0, 3) as $n): ?>
+                        <div class="notice-item">
+                            <div class="notice-icon" style="background:rgba(108,99,255,0.12);color:var(--primary-light);">
+                                <i class="fa-solid fa-bullhorn"></i>
+                            </div>
+                            <div class="notice-body">
+                                <div class="notice-title"><?= htmlspecialchars($n['title']) ?></div>
+                                <div class="notice-meta">
+                                    By <?= htmlspecialchars($n['posted_by_name']) ?> &middot;
+                                    <?= date('M d, Y', strtotime($n['created_at'])) ?> &middot;
+                                    <span class="badge-glass badge-purple"><?= $n['target_role'] ?></span>
+                                </div>
+                            </div>
+                        </div>
+                        <?php endforeach; ?>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Recent Students -->
+            <div class="glass-card">
+                <div class="card-header-glass">
+                    <div class="card-title"><i class="fa-solid fa-user-graduate"></i> Recent Students</div>
+                    <a href="?section=students" class="btn-secondary-glow btn-sm">View All</a>
+                </div>
+                <div class="table-container">
+                    <table class="table-glass" id="recentStudentsTable">
+                        <thead><tr>
+                            <th>Name</th><th>Roll No</th><th>Class</th><th>Email</th><th>Status</th>
+                        </tr></thead>
+                        <tbody>
+                        <?php foreach (array_slice($students, 0, 5) as $s): ?>
+                        <tr>
+                            <td><?= htmlspecialchars($s['full_name']) ?></td>
+                            <td><span class="badge-glass badge-purple"><?= htmlspecialchars($s['roll_number']) ?></span></td>
+                            <td><?= htmlspecialchars($s['class_name'] ?? '—') ?></td>
+                            <td style="color:var(--text-muted);"><?= htmlspecialchars($s['email']) ?></td>
+                            <td><span class="badge-glass <?= $s['status'] === 'active' ? 'badge-green' : 'badge-red' ?>"><?= $s['status'] ?></span></td>
+                        </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- ===================================================
+                 SECTION: STUDENTS
+                 =================================================== -->
+            <?php elseif ($section === 'students'): ?>
+            <div class="glass-card" style="margin-bottom:1.5rem;">
+                <div class="card-header-glass">
+                    <div class="card-title"><i class="fa-solid fa-user-graduate"></i> All Students</div>
+                    <button class="btn-primary-glow btn-sm" data-bs-toggle="modal" data-bs-target="#addStudentModal" style="width:auto;">
+                        <i class="fa-solid fa-plus"></i> Add Student
+                    </button>
+                </div>
+                <div class="card-body-glass" style="padding-bottom:0.5rem;">
+                    <div class="table-toolbar" style="margin-bottom:1rem;">
+                        <div class="search-input-wrap">
+                            <i class="fa-solid fa-search search-icon"></i>
+                            <input type="text" class="form-control" placeholder="Search students..." data-search="studentsTable">
+                        </div>
+                    </div>
+                </div>
+                <div class="table-container">
+                    <table class="table-glass" id="studentsTable">
+                        <thead><tr>
+                            <th>#</th><th>Name</th><th>Roll No</th><th>Class</th><th>Email</th><th>Phone</th><th>Status</th><th>Actions</th>
+                        </tr></thead>
+                        <tbody>
+                        <?php foreach ($students as $i => $s): ?>
+                        <tr>
+                            <td style="color:var(--text-muted);"><?= $i+1 ?></td>
+                            <td><?= htmlspecialchars($s['full_name']) ?></td>
+                            <td><span class="badge-glass badge-purple"><?= htmlspecialchars($s['roll_number']) ?></span></td>
+                            <td><?= htmlspecialchars($s['class_name'] ?? '—') ?></td>
+                            <td style="color:var(--text-muted);font-size:0.82rem;"><?= htmlspecialchars($s['email']) ?></td>
+                            <td style="color:var(--text-muted);"><?= htmlspecialchars($s['phone'] ?? '—') ?></td>
+                            <td><span class="badge-glass <?= $s['status'] === 'active' ? 'badge-green' : 'badge-red' ?>"><?= $s['status'] ?></span></td>
+                            <td>
+                                <a href="actions/manage_records.php?action=delete_user&id=<?= $s['id'] ?>&redirect=admin_dashboard.php?section=students"
+                                   class="btn-danger-glow btn-sm"
+                                   data-confirm="Delete this student permanently?">
+                                    <i class="fa-solid fa-trash"></i>
+                                </a>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                        <?php if (empty($students)): ?>
+                        <tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:2rem;">No students found.</td></tr>
+                        <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- ===================================================
+                 SECTION: TEACHERS
+                 =================================================== -->
+            <?php elseif ($section === 'teachers'): ?>
+            <div class="glass-card" style="margin-bottom:1.5rem;">
+                <div class="card-header-glass">
+                    <div class="card-title"><i class="fa-solid fa-chalkboard-user"></i> All Teachers</div>
+                    <button class="btn-primary-glow btn-sm" data-bs-toggle="modal" data-bs-target="#addTeacherModal" style="width:auto;">
+                        <i class="fa-solid fa-plus"></i> Add Teacher
+                    </button>
+                </div>
+                <div class="card-body-glass" style="padding-bottom:0.5rem;">
+                    <div class="table-toolbar" style="margin-bottom:1rem;">
+                        <div class="search-input-wrap">
+                            <i class="fa-solid fa-search search-icon"></i>
+                            <input type="text" class="form-control" placeholder="Search teachers..." data-search="teachersTable">
+                        </div>
+                    </div>
+                </div>
+                <div class="table-container">
+                    <table class="table-glass" id="teachersTable">
+                        <thead><tr>
+                            <th>#</th><th>Name</th><th>Employee ID</th><th>Subject</th><th>Email</th><th>Phone</th><th>Qualification</th><th>Status</th><th>Actions</th>
+                        </tr></thead>
+                        <tbody>
+                        <?php foreach ($teachers as $i => $t): ?>
+                        <tr>
+                            <td style="color:var(--text-muted);"><?= $i+1 ?></td>
+                            <td><?= htmlspecialchars($t['full_name']) ?></td>
+                            <td><span class="badge-glass badge-cyan"><?= htmlspecialchars($t['employee_id']) ?></span></td>
+                            <td><?= htmlspecialchars($t['subject'] ?? '—') ?></td>
+                            <td style="color:var(--text-muted);font-size:0.82rem;"><?= htmlspecialchars($t['email']) ?></td>
+                            <td style="color:var(--text-muted);"><?= htmlspecialchars($t['phone'] ?? '—') ?></td>
+                            <td style="color:var(--text-muted);"><?= htmlspecialchars($t['qualification'] ?? '—') ?></td>
+                            <td><span class="badge-glass <?= $t['status'] === 'active' ? 'badge-green' : 'badge-red' ?>"><?= $t['status'] ?></span></td>
+                            <td>
+                                <a href="actions/manage_records.php?action=delete_user&id=<?= $t['id'] ?>&redirect=admin_dashboard.php?section=teachers"
+                                   class="btn-danger-glow btn-sm"
+                                   data-confirm="Delete this teacher permanently?">
+                                    <i class="fa-solid fa-trash"></i>
+                                </a>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                        <?php if (empty($teachers)): ?>
+                        <tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:2rem;">No teachers found.</td></tr>
+                        <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- ===================================================
+                 SECTION: CLASSES
+                 =================================================== -->
+            <?php elseif ($section === 'classes'): ?>
+            <div class="glass-card">
+                <div class="card-header-glass">
+                    <div class="card-title"><i class="fa-solid fa-building-columns"></i> Classes</div>
+                    <button class="btn-primary-glow btn-sm" data-bs-toggle="modal" data-bs-target="#addClassModal" style="width:auto;">
+                        <i class="fa-solid fa-plus"></i> Add Class
+                    </button>
+                </div>
+                <div class="table-container">
+                    <table class="table-glass" id="classesTable">
+                        <thead><tr><th>#</th><th>Class</th><th>Section</th><th>Teacher</th><th>Students</th><th>Actions</th></tr></thead>
+                        <tbody>
+                        <?php foreach ($classes as $i => $c): ?>
+                        <tr>
+                            <td style="color:var(--text-muted);"><?= $i+1 ?></td>
+                            <td><?= htmlspecialchars($c['class_name']) ?></td>
+                            <td><span class="badge-glass badge-pink"><?= htmlspecialchars($c['section']) ?></span></td>
+                            <td><?= htmlspecialchars($c['teacher_name'] ?? '—') ?></td>
+                            <td><span class="badge-glass badge-green"><?= $c['student_count'] ?></span></td>
+                            <td>
+                                <a href="actions/manage_records.php?action=delete_class&id=<?= $c['id'] ?>&redirect=admin_dashboard.php?section=classes"
+                                   class="btn-danger-glow btn-sm" data-confirm="Delete this class?">
+                                    <i class="fa-solid fa-trash"></i>
+                                </a>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- ===================================================
+                 SECTION: SUBJECTS
+                 =================================================== -->
+            <?php elseif ($section === 'subjects'): ?>
+            <div class="glass-card">
+                <div class="card-header-glass">
+                    <div class="card-title"><i class="fa-solid fa-book-open"></i> Subjects</div>
+                    <button class="btn-primary-glow btn-sm" data-bs-toggle="modal" data-bs-target="#addSubjectModal" style="width:auto;">
+                        <i class="fa-solid fa-plus"></i> Add Subject
+                    </button>
+                </div>
+                <div class="table-container">
+                    <table class="table-glass">
+                        <thead><tr><th>#</th><th>Subject</th><th>Class</th><th>Teacher</th><th>Actions</th></tr></thead>
+                        <tbody>
+                        <?php foreach ($subjects as $i => $sub): ?>
+                        <tr>
+                            <td style="color:var(--text-muted);"><?= $i+1 ?></td>
+                            <td><?= htmlspecialchars($sub['subject_name']) ?></td>
+                            <td><?= htmlspecialchars($sub['class_name']) ?></td>
+                            <td><?= htmlspecialchars($sub['teacher_name'] ?? '—') ?></td>
+                            <td>
+                                <a href="actions/manage_records.php?action=delete_subject&id=<?= $sub['id'] ?>&redirect=admin_dashboard.php?section=subjects"
+                                   class="btn-danger-glow btn-sm" data-confirm="Delete this subject?">
+                                    <i class="fa-solid fa-trash"></i>
+                                </a>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- ===================================================
+                 SECTION: NOTICES
+                 =================================================== -->
+            <?php elseif ($section === 'notices'): ?>
+            <div class="grid-2" style="align-items:start;">
+                <div class="glass-card">
+                    <div class="card-header-glass">
+                        <div class="card-title"><i class="fa-solid fa-bullhorn"></i> Post Notice</div>
+                    </div>
+                    <div class="card-body-glass">
+                        <form method="POST" action="actions/manage_records.php">
+                            <input type="hidden" name="action" value="add_notice">
+                            <input type="hidden" name="redirect" value="admin_dashboard.php?section=notices">
+                            <div class="form-group">
+                                <label class="form-label">Title</label>
+                                <input type="text" name="title" class="form-control" placeholder="Notice title" required>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Content</label>
+                                <textarea name="content" class="form-control" rows="4" placeholder="Notice content..." required style="resize:vertical;"></textarea>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Target Audience</label>
+                                <select name="target_role" class="form-select">
+                                    <option value="all">Everyone</option>
+                                    <option value="student">Students Only</option>
+                                    <option value="teacher">Teachers Only</option>
+                                </select>
+                            </div>
+                            <button type="submit" class="btn-primary-glow">
+                                <i class="fa-solid fa-paper-plane"></i> Post Notice
+                            </button>
+                        </form>
+                    </div>
+                </div>
+                <div class="glass-card">
+                    <div class="card-header-glass">
+                        <div class="card-title"><i class="fa-solid fa-list"></i> All Notices</div>
+                    </div>
+                    <div class="card-body-glass">
+                        <?php if (empty($notices)): ?>
+                        <p style="color:var(--text-muted);font-size:0.85rem;">No notices yet.</p>
+                        <?php else: ?>
+                        <?php foreach ($notices as $n): ?>
+                        <div class="notice-item">
+                            <div class="notice-icon" style="background:rgba(108,99,255,0.12);color:var(--primary-light);">
+                                <i class="fa-solid fa-bullhorn"></i>
+                            </div>
+                            <div class="notice-body" style="flex:1;">
+                                <div class="notice-title"><?= htmlspecialchars($n['title']) ?></div>
+                                <div class="notice-meta" style="margin-bottom:0.4rem;">
+                                    <?= date('M d, Y', strtotime($n['created_at'])) ?> &middot;
+                                    <span class="badge-glass badge-purple"><?= $n['target_role'] ?></span>
+                                </div>
+                                <p style="font-size:0.82rem;color:var(--text-secondary);margin:0;"><?= nl2br(htmlspecialchars($n['content'])) ?></p>
+                            </div>
+                            <div>
+                                <a href="actions/manage_records.php?action=delete_notice&id=<?= $n['id'] ?>&redirect=admin_dashboard.php?section=notices"
+                                   class="btn-danger-glow btn-sm" data-confirm="Delete this notice?">
+                                    <i class="fa-solid fa-trash"></i>
+                                </a>
+                            </div>
+                        </div>
+                        <?php endforeach; ?>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===================================================
+                 SECTION: ATTENDANCE
+                 =================================================== -->
+            <?php elseif ($section === 'attendance'): ?>
+            <div class="glass-card">
+                <div class="card-header-glass">
+                    <div class="card-title"><i class="fa-solid fa-clipboard-check"></i> Attendance Records</div>
+                </div>
+                <div class="table-container">
+                    <table class="table-glass">
+                        <thead><tr><th>Date</th><th>Student</th><th>Roll No</th><th>Class</th><th>Status</th></tr></thead>
+                        <tbody>
+                        <?php if (empty($attendanceRecords)): ?>
+                        <tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:2rem;">No attendance records found.</td></tr>
+                        <?php else: ?>
+                        <?php foreach ($attendanceRecords as $a): ?>
+                        <tr>
+                            <td><?= date('M d, Y', strtotime($a['date'])) ?></td>
+                            <td><?= htmlspecialchars($a['full_name']) ?></td>
+                            <td><span class="badge-glass badge-purple"><?= htmlspecialchars($a['roll_number'] ?? '') ?></span></td>
+                            <td><?= htmlspecialchars($a['class_name']) ?></td>
+                            <td>
+                                <span class="badge-glass <?= $a['status'] === 'present' ? 'badge-green' : ($a['status'] === 'late' ? 'badge-orange' : 'badge-red') ?>">
+                                    <?= ucfirst($a['status']) ?>
+                                </span>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                        <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- ===================================================
+                 SECTION: GRADES
+                 =================================================== -->
+            <?php elseif ($section === 'grades'): ?>
+            <div class="glass-card">
+                <div class="card-header-glass">
+                    <div class="card-title"><i class="fa-solid fa-chart-bar"></i> Grades Overview</div>
+                </div>
+                <div class="table-container">
+                    <table class="table-glass">
+                        <thead><tr><th>Student</th><th>Roll No</th><th>Subject</th><th>Exam</th><th>Marks</th><th>Grade</th></tr></thead>
+                        <tbody>
+                        <?php if (empty($gradesOverview)): ?>
+                        <tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:2rem;">No grades recorded yet.</td></tr>
+                        <?php else: ?>
+                        <?php foreach ($gradesOverview as $g): ?>
+                        <tr>
+                            <td><?= htmlspecialchars($g['student_name']) ?></td>
+                            <td><span class="badge-glass badge-purple"><?= htmlspecialchars($g['roll_number'] ?? '') ?></span></td>
+                            <td><?= htmlspecialchars($g['subject_name']) ?></td>
+                            <td><span class="badge-glass badge-cyan"><?= ucfirst($g['exam_type']) ?></span></td>
+                            <td><?= $g['marks_obtained'] ?> / <?= $g['total_marks'] ?></td>
+                            <td><span class="badge-glass badge-green"><?= htmlspecialchars($g['grade_letter'] ?? '—') ?></span></td>
+                        </tr>
+                        <?php endforeach; ?>
+                        <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <?php endif; ?>
+
+        </div><!-- /page-body -->
+    </div><!-- /main-content -->
+</div><!-- /app-wrapper -->
+
+<!-- ===================================================
+     MODALS
+     =================================================== -->
+
+<!-- Add Student Modal -->
+<div class="modal fade modal-glass" id="addStudentModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="fa-solid fa-user-plus" style="color:var(--primary-light);margin-right:0.5rem;"></i> Add New Student</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="POST" action="actions/manage_records.php">
+                <input type="hidden" name="action" value="add_student">
+                <input type="hidden" name="redirect" value="admin_dashboard.php?section=students&msg=student_added">
+                <div class="modal-body">
+                    <div class="form-group"><label class="form-label">Full Name</label>
+                        <input type="text" name="full_name" class="form-control" required></div>
+                    <div class="form-group"><label class="form-label">Email</label>
+                        <input type="email" name="email" class="form-control" required></div>
+                    <div class="form-group"><label class="form-label">Password</label>
+                        <input type="password" name="password" class="form-control" placeholder="Min 6 chars" required></div>
+                    <div class="grid-2">
+                        <div class="form-group"><label class="form-label">Class</label>
+                            <select name="class_id" class="form-select">
+                                <option value="">-- None --</option>
+                                <?php foreach ($classesList as $c): ?>
+                                <option value="<?= $c['id'] ?>"><?= htmlspecialchars($c['class_name'].' '.$c['section']) ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="form-group"><label class="form-label">Date of Birth</label>
+                            <input type="date" name="date_of_birth" class="form-control"></div>
+                    </div>
+                    <div class="form-group"><label class="form-label">Phone</label>
+                        <input type="text" name="phone" class="form-control" placeholder="0300-0000000"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn-secondary-glow" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn-primary-glow btn-sm" style="width:auto;"><i class="fa-solid fa-save"></i> Save Student</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Add Teacher Modal -->
+<div class="modal fade modal-glass" id="addTeacherModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="fa-solid fa-user-plus" style="color:var(--secondary);margin-right:0.5rem;"></i> Add New Teacher</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="POST" action="actions/manage_records.php">
+                <input type="hidden" name="action" value="add_teacher">
+                <input type="hidden" name="redirect" value="admin_dashboard.php?section=teachers&msg=teacher_added">
+                <div class="modal-body">
+                    <div class="form-group"><label class="form-label">Full Name</label>
+                        <input type="text" name="full_name" class="form-control" required></div>
+                    <div class="form-group"><label class="form-label">Email</label>
+                        <input type="email" name="email" class="form-control" required></div>
+                    <div class="form-group"><label class="form-label">Password</label>
+                        <input type="password" name="password" class="form-control" required></div>
+                    <div class="grid-2">
+                        <div class="form-group"><label class="form-label">Subject</label>
+                            <input type="text" name="subject" class="form-control" placeholder="Mathematics"></div>
+                        <div class="form-group"><label class="form-label">Phone</label>
+                            <input type="text" name="phone" class="form-control" placeholder="0300-0000000"></div>
+                    </div>
+                    <div class="form-group"><label class="form-label">Qualification</label>
+                        <input type="text" name="qualification" class="form-control" placeholder="M.Sc Mathematics"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn-secondary-glow" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn-primary-glow btn-sm" style="width:auto;"><i class="fa-solid fa-save"></i> Save Teacher</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Add Class Modal -->
+<div class="modal fade modal-glass" id="addClassModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="fa-solid fa-plus" style="color:var(--success);margin-right:0.5rem;"></i> Add New Class</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="POST" action="actions/manage_records.php">
+                <input type="hidden" name="action" value="add_class">
+                <input type="hidden" name="redirect" value="admin_dashboard.php?section=classes&msg=class_added">
+                <div class="modal-body">
+                    <div class="grid-2">
+                        <div class="form-group"><label class="form-label">Class Name</label>
+                            <input type="text" name="class_name" class="form-control" placeholder="Grade 10" required></div>
+                        <div class="form-group"><label class="form-label">Section</label>
+                            <input type="text" name="section" class="form-control" placeholder="A" required></div>
+                    </div>
+                    <div class="form-group"><label class="form-label">Assign Teacher</label>
+                        <select name="teacher_id" class="form-select">
+                            <option value="">-- None --</option>
+                            <?php foreach ($teachersList as $t): ?>
+                            <option value="<?= $t['id'] ?>"><?= htmlspecialchars($t['full_name']) ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn-secondary-glow" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn-success-glow btn-sm" style="width:auto;"><i class="fa-solid fa-save"></i> Create Class</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Add Subject Modal -->
+<div class="modal fade modal-glass" id="addSubjectModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="fa-solid fa-book-open" style="color:var(--accent);margin-right:0.5rem;"></i> Add Subject</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="POST" action="actions/manage_records.php">
+                <input type="hidden" name="action" value="add_subject">
+                <input type="hidden" name="redirect" value="admin_dashboard.php?section=subjects">
+                <div class="modal-body">
+                    <div class="form-group"><label class="form-label">Subject Name</label>
+                        <input type="text" name="subject_name" class="form-control" placeholder="Mathematics" required></div>
+                    <div class="form-group"><label class="form-label">Class</label>
+                        <select name="class_id" class="form-select" required>
+                            <option value="">-- Select Class --</option>
+                            <?php foreach ($classesList as $c): ?>
+                            <option value="<?= $c['id'] ?>"><?= htmlspecialchars($c['class_name'].' '.$c['section']) ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="form-group"><label class="form-label">Assign Teacher</label>
+                        <select name="teacher_id" class="form-select">
+                            <option value="">-- None --</option>
+                            <?php foreach ($teachersList as $t): ?>
+                            <option value="<?= $t['id'] ?>"><?= htmlspecialchars($t['full_name']) ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn-secondary-glow" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn-primary-glow btn-sm" style="width:auto;"><i class="fa-solid fa-save"></i> Add Subject</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

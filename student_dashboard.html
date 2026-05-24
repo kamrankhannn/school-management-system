@@ -1,0 +1,463 @@
+<?php
+session_start();
+require_once 'config/db.php';
+
+if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'student') {
+    header('Location: login.php'); exit;
+}
+
+$db     = getDB();
+$userId = $_SESSION['user_id'];
+
+// Get student record
+$student = $db->prepare(
+    "SELECT s.*, u.full_name, u.email, CONCAT(c.class_name,' ',c.section) AS class_name, c.id AS class_id
+     FROM students s
+     JOIN users u ON u.id = s.user_id
+     LEFT JOIN classes c ON c.id = s.class_id
+     WHERE s.user_id = ?"
+);
+$student->execute([$userId]);
+$student = $student->fetch();
+
+if (!$student) {
+    // User exists but no student record yet
+    $student = ['full_name' => $_SESSION['full_name'], 'email' => $_SESSION['email'],
+                 'roll_number' => 'N/A', 'class_name' => 'Unassigned', 'class_id' => null, 'id' => null];
+}
+
+$section = $_GET['section'] ?? 'dashboard';
+
+// ---- Attendance records
+$attRecords = [];
+$presentCount = 0; $absentCount = 0; $lateCount = 0;
+if ($student['id']) {
+    $att = $db->prepare(
+        "SELECT a.date, a.status, CONCAT(c.class_name,' ',c.section) AS class_name
+         FROM attendance a
+         JOIN classes c ON c.id = a.class_id
+         WHERE a.student_id = ?
+         ORDER BY a.date DESC LIMIT 60"
+    );
+    $att->execute([$student['id']]);
+    $attRecords = $att->fetchAll();
+
+    foreach ($attRecords as $a) {
+        if ($a['status'] === 'present') $presentCount++;
+        elseif ($a['status'] === 'absent') $absentCount++;
+        else $lateCount++;
+    }
+}
+$totalAtt = $presentCount + $absentCount + $lateCount;
+$attPct   = $totalAtt > 0 ? round(($presentCount / $totalAtt) * 100) : 0;
+
+// ---- Grades
+$grades = [];
+$subjectLabels = [];
+$subjectMarks  = [];
+if ($student['id']) {
+    $gr = $db->prepare(
+        "SELECT g.*, sub.subject_name, g.marks_obtained, g.total_marks, g.grade_letter, g.exam_type
+         FROM grades g
+         JOIN subjects sub ON sub.id = g.subject_id
+         WHERE g.student_id = ?
+         ORDER BY g.created_at DESC"
+    );
+    $gr->execute([$student['id']]);
+    $grades = $gr->fetchAll();
+
+    // Build chart data: average per subject
+    $subjectMap = [];
+    foreach ($grades as $g) {
+        $sn = $g['subject_name'];
+        if (!isset($subjectMap[$sn])) $subjectMap[$sn] = ['total' => 0, 'count' => 0];
+        $subjectMap[$sn]['total'] += ($g['total_marks'] > 0 ? ($g['marks_obtained'] / $g['total_marks']) * 100 : 0);
+        $subjectMap[$sn]['count']++;
+    }
+    foreach ($subjectMap as $sn => $data) {
+        $subjectLabels[] = $sn;
+        $subjectMarks[]  = round($data['total'] / $data['count'], 1);
+    }
+}
+
+// ---- Overall GPA / average
+$overallAvg = 0;
+if (!empty($grades)) {
+    $sum = 0; $cnt = 0;
+    foreach ($grades as $g) {
+        if ($g['total_marks'] > 0) { $sum += ($g['marks_obtained'] / $g['total_marks']) * 100; $cnt++; }
+    }
+    $overallAvg = $cnt > 0 ? round($sum / $cnt, 1) : 0;
+}
+
+// ---- Notices for students
+$notices = $db->query("SELECT n.*, u.full_name AS poster FROM notices n JOIN users u ON u.id=n.posted_by WHERE n.target_role IN ('all','student') ORDER BY n.created_at DESC LIMIT 6")->fetchAll();
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Student Dashboard - EduTrack School Management System">
+    <title>Student Dashboard | EduTrack SMS</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet">
+    <link href="css/style.css" rel="stylesheet">
+</head>
+<body>
+<div class="app-wrapper">
+    <?php require_once 'includes/sidebar.php'; ?>
+
+    <div class="main-content">
+        <header class="top-header">
+            <div style="display:flex;align-items:center;gap:1rem;">
+                <button class="sidebar-toggle" id="sidebarToggle"><i class="fa-solid fa-bars"></i></button>
+                <div class="page-title-header">
+                    <?= $section === 'dashboard' ? 'Student Dashboard' : ucfirst($section) ?>
+                    <span>Welcome back, <?= htmlspecialchars($_SESSION['full_name']) ?></span>
+                </div>
+            </div>
+            <div class="header-actions">
+                <div class="header-badge"><i class="fa-solid fa-bell"></i><span class="badge-dot"></span></div>
+                <a href="logout.php" class="header-badge"><i class="fa-solid fa-right-from-bracket"></i></a>
+            </div>
+        </header>
+
+        <div class="page-body">
+
+            <!-- ===== DASHBOARD ===== -->
+            <?php if ($section === 'dashboard'): ?>
+
+            <!-- Stat Cards -->
+            <div class="stat-cards-grid">
+                <div class="stat-card">
+                    <div class="stat-info">
+                        <div class="stat-value"><?= $attPct ?>%</div>
+                        <div class="stat-label">Attendance Rate</div>
+                        <div class="stat-change <?= $attPct >= 75 ? 'up' : 'down' ?>">
+                            <i class="fa-solid fa-<?= $attPct >= 75 ? 'arrow-up' : 'arrow-down' ?>"></i>
+                            <?= $attPct >= 75 ? 'Good Standing' : 'Below Minimum' ?>
+                        </div>
+                    </div>
+                    <div class="stat-icon-wrap <?= $attPct >= 75 ? 'green' : 'pink' ?>">
+                        <i class="fa-solid fa-calendar-check"></i>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-info">
+                        <div class="stat-value"><?= $overallAvg ?>%</div>
+                        <div class="stat-label">Overall Average</div>
+                        <div class="stat-change up"><i class="fa-solid fa-chart-line"></i> Academic Performance</div>
+                    </div>
+                    <div class="stat-icon-wrap purple"><i class="fa-solid fa-chart-bar"></i></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-info">
+                        <div class="stat-value" data-count="<?= $presentCount ?>"><?= $presentCount ?></div>
+                        <div class="stat-label">Days Present</div>
+                        <div class="stat-change up"><i class="fa-solid fa-check-circle"></i> Out of <?= $totalAtt ?></div>
+                    </div>
+                    <div class="stat-icon-wrap green"><i class="fa-solid fa-clipboard-check"></i></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-info">
+                        <div class="stat-value" data-count="<?= count($grades) ?>"><?= count($grades) ?></div>
+                        <div class="stat-label">Grades Recorded</div>
+                        <div class="stat-change up"><i class="fa-solid fa-star"></i> Across all subjects</div>
+                    </div>
+                    <div class="stat-icon-wrap cyan"><i class="fa-solid fa-star"></i></div>
+                </div>
+            </div>
+
+            <!-- Profile Card + Charts -->
+            <div class="grid-2" style="margin-bottom:1.5rem;">
+                <!-- Profile Info -->
+                <div class="glass-card">
+                    <div class="card-header-glass">
+                        <div class="card-title"><i class="fa-solid fa-id-card"></i> My Profile</div>
+                    </div>
+                    <div class="card-body-glass">
+                        <div style="display:flex;align-items:center;gap:1.25rem;margin-bottom:1.5rem;">
+                            <div style="width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,var(--primary),var(--secondary));display:flex;align-items:center;justify-content:center;font-size:1.5rem;font-weight:700;color:#fff;flex-shrink:0;border:3px solid rgba(255,255,255,0.15);">
+                                <?= strtoupper(substr($student['full_name'], 0, 1)) ?>
+                            </div>
+                            <div>
+                                <div style="font-size:1.1rem;font-weight:700;color:var(--text-primary);"><?= htmlspecialchars($student['full_name']) ?></div>
+                                <div style="font-size:0.82rem;color:var(--primary-light);">Student</div>
+                            </div>
+                        </div>
+                        <?php
+                        $profileItems = [
+                            ['fa-id-badge',       'Roll Number',  $student['roll_number'] ?? 'N/A'],
+                            ['fa-building-columns','Class',        $student['class_name']  ?? 'Unassigned'],
+                            ['fa-envelope',       'Email',        $student['email']        ?? '—'],
+                            ['fa-phone',          'Phone',        $student['phone']        ?? '—'],
+                            ['fa-calendar',       'Date of Birth',$student['date_of_birth'] ?? '—'],
+                        ];
+                        foreach ($profileItems as [$icon, $label, $val]):
+                        ?>
+                        <div style="display:flex;align-items:center;gap:0.75rem;padding:0.55rem 0;border-bottom:1px solid var(--glass-border);">
+                            <div style="width:30px;height:30px;border-radius:8px;background:rgba(108,99,255,0.12);display:flex;align-items:center;justify-content:center;color:var(--primary-light);font-size:0.8rem;flex-shrink:0;">
+                                <i class="fa-solid <?= $icon ?>"></i>
+                            </div>
+                            <div>
+                                <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:0.1rem;"><?= $label ?></div>
+                                <div style="font-size:0.88rem;color:var(--text-primary);font-weight:500;"><?= htmlspecialchars($val) ?></div>
+                            </div>
+                        </div>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+
+                <!-- Attendance Doughnut -->
+                <div class="glass-card">
+                    <div class="card-header-glass">
+                        <div class="card-title"><i class="fa-solid fa-chart-pie"></i> My Attendance</div>
+                    </div>
+                    <div class="card-body-glass" style="display:flex;flex-direction:column;align-items:center;">
+                        <?php if ($totalAtt === 0): ?>
+                        <div style="text-align:center;padding:2rem;color:var(--text-muted);">
+                            <i class="fa-solid fa-calendar-xmark fa-2x" style="margin-bottom:0.75rem;opacity:0.3;"></i>
+                            <p style="font-size:0.85rem;">No attendance records yet.</p>
+                        </div>
+                        <?php else: ?>
+                        <canvas id="attendanceChart" height="220"
+                            data-present="<?= $presentCount ?>"
+                            data-absent="<?= $absentCount ?>"
+                            data-late="<?= $lateCount ?>">
+                        </canvas>
+                        <div style="margin-top:1rem;display:flex;gap:1.5rem;text-align:center;">
+                            <div><div style="font-size:1.2rem;font-weight:700;color:var(--success);"><?= $presentCount ?></div><div style="font-size:0.75rem;color:var(--text-muted);">Present</div></div>
+                            <div><div style="font-size:1.2rem;font-weight:700;color:var(--danger);"><?= $absentCount ?></div><div style="font-size:0.75rem;color:var(--text-muted);">Absent</div></div>
+                            <div><div style="font-size:1.2rem;font-weight:700;color:var(--warning);"><?= $lateCount ?></div><div style="font-size:0.75rem;color:var(--text-muted);">Late</div></div>
+                        </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Grades Chart + Notices -->
+            <div class="grid-2">
+                <div class="glass-card">
+                    <div class="card-header-glass">
+                        <div class="card-title"><i class="fa-solid fa-chart-bar"></i> Grades by Subject</div>
+                    </div>
+                    <div class="card-body-glass">
+                        <?php if (empty($grades)): ?>
+                        <div style="text-align:center;padding:2rem;color:var(--text-muted);">
+                            <i class="fa-solid fa-chart-simple fa-2x" style="margin-bottom:0.75rem;opacity:0.3;"></i>
+                            <p style="font-size:0.85rem;">No grades recorded yet.</p>
+                        </div>
+                        <?php else: ?>
+                        <canvas id="gradesChart" height="200"
+                            data-labels='<?= json_encode($subjectLabels) ?>'
+                            data-values='<?= json_encode($subjectMarks) ?>'>
+                        </canvas>
+                        <?php endif; ?>
+                    </div>
+                </div>
+
+                <div class="glass-card">
+                    <div class="card-header-glass">
+                        <div class="card-title"><i class="fa-solid fa-bullhorn"></i> Notices</div>
+                    </div>
+                    <div class="card-body-glass">
+                        <?php if (empty($notices)): ?>
+                        <p style="color:var(--text-muted);font-size:0.85rem;">No notices available.</p>
+                        <?php else: ?>
+                        <?php foreach ($notices as $n): ?>
+                        <div class="notice-item">
+                            <div class="notice-icon" style="background:rgba(108,99,255,0.12);color:var(--primary-light);">
+                                <i class="fa-solid fa-bullhorn"></i>
+                            </div>
+                            <div class="notice-body">
+                                <div class="notice-title"><?= htmlspecialchars($n['title']) ?></div>
+                                <div class="notice-meta"><?= date('M d, Y', strtotime($n['created_at'])) ?></div>
+                            </div>
+                        </div>
+                        <?php endforeach; ?>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== ATTENDANCE ===== -->
+            <?php elseif ($section === 'attendance'): ?>
+
+            <!-- Attendance Summary -->
+            <div class="stat-cards-grid" style="grid-template-columns:repeat(4,1fr);">
+                <div class="stat-card">
+                    <div class="stat-info"><div class="stat-value"><?= $presentCount ?></div><div class="stat-label">Present</div></div>
+                    <div class="stat-icon-wrap green"><i class="fa-solid fa-check"></i></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-info"><div class="stat-value"><?= $absentCount ?></div><div class="stat-label">Absent</div></div>
+                    <div class="stat-icon-wrap pink"><i class="fa-solid fa-times"></i></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-info"><div class="stat-value"><?= $lateCount ?></div><div class="stat-label">Late</div></div>
+                    <div class="stat-icon-wrap orange"><i class="fa-solid fa-clock"></i></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-info"><div class="stat-value"><?= $attPct ?>%</div><div class="stat-label">Rate</div></div>
+                    <div class="stat-icon-wrap purple"><i class="fa-solid fa-percent"></i></div>
+                </div>
+            </div>
+
+            <!-- Progress bar -->
+            <div class="glass-card" style="margin-bottom:1.5rem;">
+                <div class="card-body-glass">
+                    <div style="display:flex;justify-content:space-between;margin-bottom:0.6rem;">
+                        <span style="font-size:0.85rem;font-weight:600;color:var(--text-primary);">Attendance Progress</span>
+                        <span style="font-size:0.85rem;font-weight:700;color:<?= $attPct >= 75 ? 'var(--success)' : 'var(--danger)' ?>;"><?= $attPct ?>%</span>
+                    </div>
+                    <div class="progress-glass">
+                        <div class="progress-fill" data-width="<?= $attPct ?>" style="width:0%;background:<?= $attPct >= 75 ? 'linear-gradient(90deg,var(--success),#00b37e)' : 'linear-gradient(90deg,var(--danger),#cc0033)' ?>;"></div>
+                    </div>
+                    <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.4rem;">Minimum required: 75%</div>
+                </div>
+            </div>
+
+            <!-- Attendance Table -->
+            <div class="glass-card">
+                <div class="card-header-glass">
+                    <div class="card-title"><i class="fa-solid fa-calendar-check"></i> Attendance History</div>
+                </div>
+                <div class="table-container">
+                    <table class="table-glass">
+                        <thead><tr><th>Date</th><th>Class</th><th>Status</th></tr></thead>
+                        <tbody>
+                        <?php if (empty($attRecords)): ?>
+                        <tr><td colspan="3" style="text-align:center;color:var(--text-muted);padding:2rem;">No attendance records found.</td></tr>
+                        <?php else: ?>
+                        <?php foreach ($attRecords as $a): ?>
+                        <tr>
+                            <td><?= date('D, M d Y', strtotime($a['date'])) ?></td>
+                            <td><?= htmlspecialchars($a['class_name']) ?></td>
+                            <td><span class="badge-glass <?= $a['status'] === 'present' ? 'badge-green' : ($a['status'] === 'late' ? 'badge-orange' : 'badge-red') ?>">
+                                <?= ucfirst($a['status']) ?></span></td>
+                        </tr>
+                        <?php endforeach; ?>
+                        <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- ===== GRADES ===== -->
+            <?php elseif ($section === 'grades'): ?>
+
+            <!-- Overall score card -->
+            <div class="stat-cards-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:1.5rem;">
+                <div class="stat-card">
+                    <div class="stat-info"><div class="stat-value"><?= $overallAvg ?>%</div><div class="stat-label">Overall Average</div></div>
+                    <div class="stat-icon-wrap purple"><i class="fa-solid fa-chart-bar"></i></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-info"><div class="stat-value"><?= count($grades) ?></div><div class="stat-label">Total Grades</div></div>
+                    <div class="stat-icon-wrap cyan"><i class="fa-solid fa-list-check"></i></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-info"><div class="stat-value"><?= count($subjectLabels) ?></div><div class="stat-label">Subjects</div></div>
+                    <div class="stat-icon-wrap green"><i class="fa-solid fa-book-open"></i></div>
+                </div>
+            </div>
+
+            <!-- Chart -->
+            <?php if (!empty($grades)): ?>
+            <div class="glass-card" style="margin-bottom:1.5rem;">
+                <div class="card-header-glass">
+                    <div class="card-title"><i class="fa-solid fa-chart-bar"></i> Performance by Subject</div>
+                </div>
+                <div class="card-body-glass">
+                    <canvas id="gradesChart" height="120"
+                        data-labels='<?= json_encode($subjectLabels) ?>'
+                        data-values='<?= json_encode($subjectMarks) ?>'>
+                    </canvas>
+                </div>
+            </div>
+            <?php endif; ?>
+
+            <!-- Grades Table -->
+            <div class="glass-card">
+                <div class="card-header-glass">
+                    <div class="card-title"><i class="fa-solid fa-star"></i> All Grades</div>
+                </div>
+                <div class="table-container">
+                    <table class="table-glass">
+                        <thead><tr><th>Subject</th><th>Exam Type</th><th>Marks</th><th>Percentage</th><th>Grade</th><th>Remarks</th></tr></thead>
+                        <tbody>
+                        <?php if (empty($grades)): ?>
+                        <tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:2rem;">No grades available yet.</td></tr>
+                        <?php else: ?>
+                        <?php foreach ($grades as $g):
+                            $pct = $g['total_marks'] > 0 ? round(($g['marks_obtained'] / $g['total_marks']) * 100, 1) : 0;
+                        ?>
+                        <tr>
+                            <td><?= htmlspecialchars($g['subject_name']) ?></td>
+                            <td><span class="badge-glass badge-cyan"><?= ucfirst($g['exam_type']) ?></span></td>
+                            <td><?= $g['marks_obtained'] ?> / <?= $g['total_marks'] ?></td>
+                            <td>
+                                <div style="display:flex;align-items:center;gap:0.5rem;">
+                                    <div class="progress-glass" style="flex:1;height:6px;">
+                                        <div class="progress-fill" style="width:<?= $pct ?>%;"></div>
+                                    </div>
+                                    <span style="font-size:0.8rem;font-weight:600;color:var(--text-primary);min-width:36px;"><?= $pct ?>%</span>
+                                </div>
+                            </td>
+                            <td><span class="badge-glass <?= ($g['grade_letter'] ?? 'F') === 'F' ? 'badge-red' : 'badge-green' ?>"><?= htmlspecialchars($g['grade_letter'] ?? '—') ?></span></td>
+                            <td style="color:var(--text-muted);font-size:0.82rem;"><?= htmlspecialchars($g['remarks'] ?? '—') ?></td>
+                        </tr>
+                        <?php endforeach; ?>
+                        <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- ===== NOTICES ===== -->
+            <?php elseif ($section === 'notices'): ?>
+            <div class="glass-card">
+                <div class="card-header-glass">
+                    <div class="card-title"><i class="fa-solid fa-bullhorn"></i> All Notices</div>
+                </div>
+                <div class="card-body-glass">
+                    <?php if (empty($notices)): ?>
+                    <div style="text-align:center;padding:3rem;color:var(--text-muted);">
+                        <i class="fa-solid fa-bell-slash fa-2x" style="margin-bottom:1rem;opacity:0.3;"></i>
+                        <p>No notices available at the moment.</p>
+                    </div>
+                    <?php else: ?>
+                    <?php foreach ($notices as $n): ?>
+                    <div class="notice-item" style="align-items:flex-start;">
+                        <div class="notice-icon" style="background:rgba(108,99,255,0.12);color:var(--primary-light);margin-top:0.2rem;">
+                            <i class="fa-solid fa-bullhorn"></i>
+                        </div>
+                        <div class="notice-body">
+                            <div class="notice-title" style="font-size:1rem;"><?= htmlspecialchars($n['title']) ?></div>
+                            <div class="notice-meta" style="margin-bottom:0.6rem;">
+                                By <?= htmlspecialchars($n['poster']) ?> &middot; <?= date('F d, Y', strtotime($n['created_at'])) ?>
+                            </div>
+                            <p style="font-size:0.88rem;color:var(--text-secondary);line-height:1.6;margin:0;">
+                                <?= nl2br(htmlspecialchars($n['content'])) ?>
+                            </p>
+                        </div>
+                    </div>
+                    <?php endforeach; ?>
+                    <?php endif; ?>
+                </div>
+            </div>
+
+            <?php endif; ?>
+
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

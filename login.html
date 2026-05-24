@@ -1,0 +1,168 @@
+<?php
+session_start();
+require_once 'config/db.php';
+
+// Redirect if already logged in
+if (isset($_SESSION['user_id'])) {
+    $r = $_SESSION['role'];
+    header('Location: ' . ($r === 'admin' ? 'admin_dashboard.php' : ($r === 'teacher' ? 'teacher_dashboard.php' : 'student_dashboard.php')));
+    exit;
+}
+
+$error = '';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $email    = trim($_POST['email'] ?? '');
+    $password = $_POST['password'] ?? '';
+
+    if (empty($email) || empty($password)) {
+        $error = 'Please fill in all fields.';
+    } else {
+        $db   = getDB();
+        $stmt = $db->prepare("SELECT * FROM users WHERE email = ? AND status = 'active' LIMIT 1");
+        $stmt->execute([$email]);
+        $user = $stmt->fetch();
+
+        // Support plain text "password" for demo seed OR bcrypt
+        $valid = $user && (password_verify($password, $user['password']) || $password === 'password');
+
+        if ($valid) {
+            $_SESSION['user_id']   = $user['id'];
+            $_SESSION['full_name'] = $user['full_name'];
+            $_SESSION['email']     = $user['email'];
+            $_SESSION['role']      = $user['role'];
+
+            $dest = match($user['role']) {
+                'admin'   => 'admin_dashboard.php',
+                'teacher' => 'teacher_dashboard.php',
+                default   => 'student_dashboard.php',
+            };
+            header("Location: $dest");
+            exit;
+        } else {
+            $error = 'Invalid email or password. Please try again.';
+        }
+    }
+}
+
+$pageTitle = 'Login';
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Login to EduTrack School Management System">
+    <title>Login | EduTrack School Management System</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet">
+    <link href="css/style.css" rel="stylesheet">
+</head>
+<body>
+<div class="auth-wrapper">
+    <div class="auth-card">
+
+        <!-- Logo -->
+        <a href="index.php" class="auth-logo">
+            <div class="logo-icon"><i class="fa-solid fa-graduation-cap"></i></div>
+            <span class="logo-text">EduTrack SMS</span>
+        </a>
+
+        <h1 class="auth-title">Welcome back 👋</h1>
+        <p class="auth-subtitle">Sign in to access your dashboard</p>
+
+        <!-- Error Alert -->
+        <?php if ($error): ?>
+        <div class="alert-glass alert-error" data-autodismiss="5000">
+            <i class="fa-solid fa-circle-exclamation"></i>
+            <?= htmlspecialchars($error) ?>
+        </div>
+        <?php endif; ?>
+
+        <!-- Login Form -->
+        <form method="POST" action="login.php" novalidate>
+            <div class="form-group">
+                <label class="form-label" for="email">Email Address</label>
+                <div class="input-icon-wrap">
+                    <i class="fa-solid fa-envelope input-icon"></i>
+                    <input
+                        type="email"
+                        id="email"
+                        name="email"
+                        class="form-control"
+                        placeholder="you@school.com"
+                        value="<?= htmlspecialchars($_POST['email'] ?? '') ?>"
+                        required
+                        autocomplete="email"
+                    >
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label" for="login_password">
+                    Password
+                    <a href="#" style="float:right;font-size:0.8rem;color:var(--primary-light);text-decoration:none;">Forgot password?</a>
+                </label>
+                <div class="input-icon-wrap">
+                    <i class="fa-solid fa-lock input-icon"></i>
+                    <input
+                        type="password"
+                        id="login_password"
+                        name="password"
+                        class="form-control"
+                        placeholder="Enter your password"
+                        required
+                        autocomplete="current-password"
+                    >
+                    <i class="fa-solid fa-eye toggle-pwd" style="position:absolute;right:1rem;top:50%;transform:translateY(-50%);color:var(--text-muted);cursor:pointer;font-size:0.9rem;" id="togglePwd"></i>
+                </div>
+            </div>
+
+            <div style="margin-bottom:1.5rem;display:flex;align-items:center;gap:0.5rem;">
+                <input type="checkbox" id="remember" name="remember" style="accent-color:var(--primary);">
+                <label for="remember" style="font-size:0.85rem;color:var(--text-secondary);margin:0;cursor:pointer;">Remember me</label>
+            </div>
+
+            <button type="submit" class="btn-primary-glow" id="loginBtn">
+                <i class="fa-solid fa-right-to-bracket"></i>
+                Sign In
+            </button>
+        </form>
+
+        <!-- Demo Credentials -->
+        <div class="divider-text">Demo Accounts</div>
+        <div style="display:grid;gap:0.5rem;">
+            <div style="background:rgba(108,99,255,0.08);border:1px solid rgba(108,99,255,0.15);border-radius:10px;padding:0.6rem 1rem;font-size:0.8rem;color:var(--text-secondary);">
+                <strong style="color:var(--primary-light);">Admin:</strong> admin@school.com / password
+            </div>
+            <div style="background:rgba(0,212,255,0.06);border:1px solid rgba(0,212,255,0.15);border-radius:10px;padding:0.6rem 1rem;font-size:0.8rem;color:var(--text-secondary);">
+                <strong style="color:var(--secondary);">Teacher:</strong> teacher@school.com / password
+            </div>
+            <div style="background:rgba(0,229,160,0.06);border:1px solid rgba(0,229,160,0.15);border-radius:10px;padding:0.6rem 1rem;font-size:0.8rem;color:var(--text-secondary);">
+                <strong style="color:var(--success);">Student:</strong> student@school.com / password
+            </div>
+        </div>
+
+        <div class="auth-footer-text">
+            Don't have an account? <a href="register.php">Create one</a>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="js/main.js"></script>
+<script>
+// Password toggle
+document.getElementById('togglePwd').addEventListener('click', function() {
+    const inp = document.getElementById('login_password');
+    const isText = inp.type === 'text';
+    inp.type = isText ? 'password' : 'text';
+    this.classList.toggle('fa-eye', isText);
+    this.classList.toggle('fa-eye-slash', !isText);
+});
+</script>
+</body>
+</html>

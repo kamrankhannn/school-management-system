@@ -1,0 +1,528 @@
+<?php
+session_start();
+require_once 'config/db.php';
+
+if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'teacher') {
+    header('Location: login.php'); exit;
+}
+
+$db     = getDB();
+$userId = $_SESSION['user_id'];
+
+// Get teacher record
+$teacher = $db->prepare("SELECT t.*, u.full_name, u.email FROM teachers t JOIN users u ON u.id = t.user_id WHERE t.user_id = ?");
+$teacher->execute([$userId]);
+$teacher = $teacher->fetch();
+
+$msg = '';
+$msgType = 'success';
+if (isset($_GET['msg'])) {
+    $msgs = ['attendance_saved' => 'Attendance saved successfully.', 'grade_added' => 'Grade recorded successfully.', 'grade_deleted' => 'Grade deleted.'];
+    $msg = $msgs[$_GET['msg']] ?? '';
+}
+
+$section = $_GET['section'] ?? 'dashboard';
+
+// ---- My Classes (via teacher_id on classes)
+$myClasses = $db->prepare(
+    "SELECT c.id, c.class_name, c.section,
+            (SELECT COUNT(*) FROM students WHERE class_id = c.id) AS student_count
+     FROM classes c WHERE c.teacher_id = ?"
+);
+$myClasses->execute([$userId]);
+$myClasses = $myClasses->fetchAll();
+
+// ---- All classes (for dropdown)
+$allClasses = $db->query("SELECT id, class_name, section FROM classes")->fetchAll();
+
+// ---- All subjects assigned to this teacher
+$mySubjects = $db->prepare(
+    "SELECT sub.id, sub.subject_name, CONCAT(c.class_name,' ',c.section) AS class_name, c.id AS class_id
+     FROM subjects sub JOIN classes c ON c.id = sub.class_id
+     WHERE sub.teacher_id = ?"
+);
+$mySubjects->execute([$userId]);
+$mySubjects = $mySubjects->fetchAll();
+
+// ---- My Students (across all my classes)
+$myStudents = $db->prepare(
+    "SELECT DISTINCT u.full_name, s.roll_number, s.phone,
+            CONCAT(c.class_name,' ',c.section) AS class_name, s.id AS student_id, c.id AS class_id
+     FROM classes c
+     JOIN students s ON s.class_id = c.id
+     JOIN users u ON u.id = s.user_id
+     WHERE c.teacher_id = ?
+     ORDER BY u.full_name"
+);
+$myStudents->execute([$userId]);
+$myStudents = $myStudents->fetchAll();
+
+// ---- Attendance records for my classes (last 50)
+$attRecords = $db->prepare(
+    "SELECT a.date, a.status, u.full_name, s.roll_number, CONCAT(c.class_name,' ',c.section) AS class_name
+     FROM attendance a
+     JOIN students s ON s.id = a.student_id
+     JOIN users u ON u.id = s.user_id
+     JOIN classes c ON c.id = a.class_id
+     WHERE c.teacher_id = ?
+     ORDER BY a.date DESC LIMIT 50"
+);
+$attRecords->execute([$userId]);
+$attRecords = $attRecords->fetchAll();
+
+// ---- Grades I've entered
+$gradeRecords = $db->prepare(
+    "SELECT g.*, u.full_name AS student_name, sub.subject_name, s.roll_number
+     FROM grades g
+     JOIN students s ON s.id = g.student_id
+     JOIN users u ON u.id = s.user_id
+     JOIN subjects sub ON sub.id = g.subject_id
+     WHERE sub.teacher_id = ?
+     ORDER BY g.created_at DESC LIMIT 100"
+);
+$gradeRecords->execute([$userId]);
+$gradeRecords = $gradeRecords->fetchAll();
+
+// ---- Stats
+$totalMyStudents  = count($myStudents);
+$totalMyClasses   = count($myClasses);
+$totalMySubjects  = count($mySubjects);
+$totalGradesEntered = count($gradeRecords);
+
+// Attendance chart data for today
+$presentCount = $db->prepare("SELECT COUNT(*) FROM attendance a JOIN classes c ON c.id=a.class_id WHERE c.teacher_id=? AND a.date=? AND a.status='present'");
+$presentCount->execute([$userId, date('Y-m-d')]);
+$presentCount = (int)$presentCount->fetchColumn();
+$absentCount  = $db->prepare("SELECT COUNT(*) FROM attendance a JOIN classes c ON c.id=a.class_id WHERE c.teacher_id=? AND a.date=? AND a.status='absent'");
+$absentCount->execute([$userId, date('Y-m-d')]);
+$absentCount = (int)$absentCount->fetchColumn();
+$lateCount    = $db->prepare("SELECT COUNT(*) FROM attendance a JOIN classes c ON c.id=a.class_id WHERE c.teacher_id=? AND a.date=? AND a.status='late'");
+$lateCount->execute([$userId, date('Y-m-d')]);
+$lateCount = (int)$lateCount->fetchColumn();
+
+// Grades by subject for chart
+$subjectLabels = array_column($mySubjects, 'subject_name');
+$subjectAvgs   = [];
+foreach ($mySubjects as $sub) {
+    $avg = $db->prepare("SELECT AVG(marks_obtained) FROM grades WHERE subject_id = ?");
+    $avg->execute([$sub['id']]);
+    $subjectAvgs[] = round((float)$avg->fetchColumn(), 1);
+}
+
+// Notices
+$notices = $db->query("SELECT n.*, u.full_name AS poster FROM notices n JOIN users u ON u.id=n.posted_by WHERE n.target_role IN ('all','teacher') ORDER BY n.created_at DESC LIMIT 5")->fetchAll();
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Teacher Dashboard - EduTrack School Management System">
+    <title>Teacher Dashboard | EduTrack SMS</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet">
+    <link href="css/style.css" rel="stylesheet">
+</head>
+<body>
+<div class="app-wrapper">
+    <?php require_once 'includes/sidebar.php'; ?>
+
+    <div class="main-content">
+        <header class="top-header">
+            <div style="display:flex;align-items:center;gap:1rem;">
+                <button class="sidebar-toggle" id="sidebarToggle"><i class="fa-solid fa-bars"></i></button>
+                <div class="page-title-header">
+                    <?= $section === 'dashboard' ? 'Teacher Dashboard' : ucfirst($section) ?>
+                    <span>Welcome back, <?= htmlspecialchars($_SESSION['full_name']) ?></span>
+                </div>
+            </div>
+            <div class="header-actions">
+                <div class="header-badge"><i class="fa-solid fa-bell"></i><span class="badge-dot"></span></div>
+                <a href="logout.php" class="header-badge"><i class="fa-solid fa-right-from-bracket"></i></a>
+            </div>
+        </header>
+
+        <div class="page-body">
+
+            <?php if ($msg): ?>
+            <div class="alert-glass alert-<?= $msgType ?>" data-autodismiss="4000">
+                <i class="fa-solid fa-circle-check"></i> <?= htmlspecialchars($msg) ?>
+            </div>
+            <?php endif; ?>
+
+            <!-- ===== DASHBOARD ===== -->
+            <?php if ($section === 'dashboard'): ?>
+
+            <div class="stat-cards-grid">
+                <div class="stat-card">
+                    <div class="stat-info">
+                        <div class="stat-value" data-count="<?= $totalMyStudents ?>"><?= $totalMyStudents ?></div>
+                        <div class="stat-label">My Students</div>
+                    </div>
+                    <div class="stat-icon-wrap purple"><i class="fa-solid fa-user-graduate"></i></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-info">
+                        <div class="stat-value" data-count="<?= $totalMyClasses ?>"><?= $totalMyClasses ?></div>
+                        <div class="stat-label">My Classes</div>
+                    </div>
+                    <div class="stat-icon-wrap cyan"><i class="fa-solid fa-building-columns"></i></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-info">
+                        <div class="stat-value" data-count="<?= $totalMySubjects ?>"><?= $totalMySubjects ?></div>
+                        <div class="stat-label">Subjects</div>
+                    </div>
+                    <div class="stat-icon-wrap pink"><i class="fa-solid fa-book-open"></i></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-info">
+                        <div class="stat-value" data-count="<?= $totalGradesEntered ?>"><?= $totalGradesEntered ?></div>
+                        <div class="stat-label">Grades Entered</div>
+                    </div>
+                    <div class="stat-icon-wrap green"><i class="fa-solid fa-chart-bar"></i></div>
+                </div>
+            </div>
+
+            <div class="grid-2" style="margin-bottom:1.5rem;">
+                <!-- Attendance Today Chart -->
+                <div class="glass-card">
+                    <div class="card-header-glass">
+                        <div class="card-title"><i class="fa-solid fa-chart-pie"></i> Today's Attendance</div>
+                        <span style="font-size:0.78rem;color:var(--text-muted);"><?= date('M d, Y') ?></span>
+                    </div>
+                    <div class="card-body-glass" style="display:flex;align-items:center;justify-content:center;">
+                        <?php if ($presentCount + $absentCount + $lateCount === 0): ?>
+                        <div style="text-align:center;padding:2rem;color:var(--text-muted);">
+                            <i class="fa-solid fa-clipboard-check fa-2x" style="margin-bottom:0.75rem;opacity:0.3;"></i>
+                            <p style="font-size:0.85rem;margin:0;">No attendance marked today.</p>
+                            <a href="?section=attendance" class="btn-secondary-glow btn-sm" style="margin-top:1rem;">Mark Now</a>
+                        </div>
+                        <?php else: ?>
+                        <canvas id="attendanceChart" height="200"
+                            data-present="<?= $presentCount ?>"
+                            data-absent="<?= $absentCount ?>"
+                            data-late="<?= $lateCount ?>">
+                        </canvas>
+                        <?php endif; ?>
+                    </div>
+                </div>
+
+                <!-- Notices -->
+                <div class="glass-card">
+                    <div class="card-header-glass">
+                        <div class="card-title"><i class="fa-solid fa-bullhorn"></i> Notices</div>
+                    </div>
+                    <div class="card-body-glass">
+                        <?php if (empty($notices)): ?>
+                        <p style="color:var(--text-muted);font-size:0.85rem;">No notices available.</p>
+                        <?php else: ?>
+                        <?php foreach ($notices as $n): ?>
+                        <div class="notice-item">
+                            <div class="notice-icon" style="background:rgba(108,99,255,0.12);color:var(--primary-light);">
+                                <i class="fa-solid fa-bullhorn"></i>
+                            </div>
+                            <div class="notice-body">
+                                <div class="notice-title"><?= htmlspecialchars($n['title']) ?></div>
+                                <div class="notice-meta"><?= date('M d, Y', strtotime($n['created_at'])) ?></div>
+                            </div>
+                        </div>
+                        <?php endforeach; ?>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+
+            <!-- My Classes -->
+            <div class="glass-card">
+                <div class="card-header-glass">
+                    <div class="card-title"><i class="fa-solid fa-building-columns"></i> My Classes</div>
+                </div>
+                <div class="table-container">
+                    <table class="table-glass">
+                        <thead><tr><th>Class</th><th>Section</th><th>Students</th><th>Action</th></tr></thead>
+                        <tbody>
+                        <?php if (empty($myClasses)): ?>
+                        <tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:2rem;">No classes assigned yet.</td></tr>
+                        <?php else: ?>
+                        <?php foreach ($myClasses as $c): ?>
+                        <tr>
+                            <td><?= htmlspecialchars($c['class_name']) ?></td>
+                            <td><span class="badge-glass badge-pink"><?= htmlspecialchars($c['section']) ?></span></td>
+                            <td><span class="badge-glass badge-green"><?= $c['student_count'] ?> students</span></td>
+                            <td><a href="?section=attendance&class_id=<?= $c['id'] ?>" class="btn-secondary-glow btn-sm"><i class="fa-solid fa-clipboard-check"></i> Mark Attendance</a></td>
+                        </tr>
+                        <?php endforeach; ?>
+                        <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- ===== ATTENDANCE ===== -->
+            <?php elseif ($section === 'attendance'): ?>
+
+            <div class="grid-2" style="align-items:start;">
+                <!-- Mark Attendance Form -->
+                <div class="glass-card">
+                    <div class="card-header-glass">
+                        <div class="card-title"><i class="fa-solid fa-clipboard-check"></i> Mark Attendance</div>
+                    </div>
+                    <div class="card-body-glass">
+                        <form method="POST" action="actions/manage_records.php" id="attendanceForm">
+                            <input type="hidden" name="action" value="save_attendance">
+                            <input type="hidden" name="redirect" value="teacher_dashboard.php?section=attendance&msg=attendance_saved">
+                            <div class="form-group">
+                                <label class="form-label">Select Class</label>
+                                <select name="class_id" id="classSelect" class="form-select" required>
+                                    <option value="">-- Select Class --</option>
+                                    <?php foreach ($myClasses as $c): ?>
+                                    <option value="<?= $c['id'] ?>" <?= (isset($_GET['class_id']) && $_GET['class_id'] == $c['id']) ? 'selected' : '' ?>>
+                                        <?= htmlspecialchars($c['class_name'].' '.$c['section']) ?>
+                                    </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Date</label>
+                                <input type="date" name="att_date" class="form-control" value="<?= date('Y-m-d') ?>" required>
+                            </div>
+
+                            <!-- Student list loaded based on class -->
+                            <?php
+                            $selectedClass = $_GET['class_id'] ?? null;
+                            $classStudents = [];
+                            if ($selectedClass) {
+                                $cs = $db->prepare("SELECT s.id, u.full_name, s.roll_number FROM students s JOIN users u ON u.id=s.user_id WHERE s.class_id=? ORDER BY u.full_name");
+                                $cs->execute([$selectedClass]);
+                                $classStudents = $cs->fetchAll();
+                            }
+                            ?>
+
+                            <?php if (!empty($classStudents)): ?>
+                            <div style="margin-bottom:1rem;">
+                                <label class="form-label" style="margin-bottom:0.75rem;">Student Attendance</label>
+                                <div style="display:flex;gap:0.5rem;margin-bottom:0.75rem;">
+                                    <button type="button" onclick="markAll('present')" class="btn-success-glow btn-sm"><i class="fa-solid fa-check"></i> All Present</button>
+                                    <button type="button" onclick="markAll('absent')" class="btn-danger-glow btn-sm"><i class="fa-solid fa-times"></i> All Absent</button>
+                                </div>
+                                <?php foreach ($classStudents as $st): ?>
+                                <div style="display:flex;align-items:center;justify-content:space-between;padding:0.6rem 0;border-bottom:1px solid var(--glass-border);">
+                                    <div>
+                                        <span style="font-size:0.9rem;font-weight:500;color:var(--text-primary);"><?= htmlspecialchars($st['full_name']) ?></span>
+                                        <span class="badge-glass badge-purple" style="margin-left:0.5rem;font-size:0.7rem;"><?= htmlspecialchars($st['roll_number']) ?></span>
+                                    </div>
+                                    <select name="attendance[<?= $st['id'] ?>]" class="form-select att-status" style="width:130px;padding:0.4rem 0.75rem;">
+                                        <option value="present">✅ Present</option>
+                                        <option value="absent">❌ Absent</option>
+                                        <option value="late">⏰ Late</option>
+                                    </select>
+                                </div>
+                                <?php endforeach; ?>
+                            </div>
+                            <button type="submit" class="btn-primary-glow"><i class="fa-solid fa-save"></i> Save Attendance</button>
+                            <?php elseif ($selectedClass): ?>
+                            <div class="alert-glass alert-info"><i class="fa-solid fa-info-circle"></i> No students in this class.</div>
+                            <?php else: ?>
+                            <div style="text-align:center;padding:1.5rem;color:var(--text-muted);">
+                                <i class="fa-solid fa-arrow-up fa-lg" style="margin-bottom:0.5rem;opacity:0.4;"></i>
+                                <p style="font-size:0.85rem;margin:0;">Select a class above to load students.</p>
+                            </div>
+                            <button type="button" class="btn-secondary-glow" style="width:100%;justify-content:center;"
+                                onclick="const s=document.getElementById('classSelect');if(s.value){window.location='?section=attendance&class_id='+s.value}else{alert('Please select a class first')}">
+                                <i class="fa-solid fa-users"></i> Load Students
+                            </button>
+                            <?php endif; ?>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Recent Attendance -->
+                <div class="glass-card">
+                    <div class="card-header-glass">
+                        <div class="card-title"><i class="fa-solid fa-history"></i> Recent Records</div>
+                    </div>
+                    <div class="table-container">
+                        <table class="table-glass">
+                            <thead><tr><th>Date</th><th>Student</th><th>Class</th><th>Status</th></tr></thead>
+                            <tbody>
+                            <?php if (empty($attRecords)): ?>
+                            <tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:2rem;">No records yet.</td></tr>
+                            <?php else: ?>
+                            <?php foreach ($attRecords as $a): ?>
+                            <tr>
+                                <td><?= date('M d', strtotime($a['date'])) ?></td>
+                                <td><?= htmlspecialchars($a['full_name']) ?></td>
+                                <td style="font-size:0.8rem;color:var(--text-muted);"><?= htmlspecialchars($a['class_name']) ?></td>
+                                <td><span class="badge-glass <?= $a['status'] === 'present' ? 'badge-green' : ($a['status'] === 'late' ? 'badge-orange' : 'badge-red') ?>">
+                                    <?= ucfirst($a['status']) ?></span></td>
+                            </tr>
+                            <?php endforeach; ?>
+                            <?php endif; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== GRADES ===== -->
+            <?php elseif ($section === 'grades'): ?>
+
+            <div class="grid-2" style="align-items:start;">
+                <!-- Add Grade Form -->
+                <div class="glass-card">
+                    <div class="card-header-glass">
+                        <div class="card-title"><i class="fa-solid fa-pen-to-square"></i> Record Grade</div>
+                    </div>
+                    <div class="card-body-glass">
+                        <form method="POST" action="actions/manage_records.php">
+                            <input type="hidden" name="action" value="add_grade">
+                            <input type="hidden" name="redirect" value="teacher_dashboard.php?section=grades&msg=grade_added">
+                            <div class="form-group">
+                                <label class="form-label">Subject</label>
+                                <select name="subject_id" class="form-select" required>
+                                    <option value="">-- Select Subject --</option>
+                                    <?php foreach ($mySubjects as $sub): ?>
+                                    <option value="<?= $sub['id'] ?>"><?= htmlspecialchars($sub['subject_name'].' ('.$sub['class_name'].')') ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Student</label>
+                                <select name="student_id" class="form-select" required>
+                                    <option value="">-- Select Student --</option>
+                                    <?php foreach ($myStudents as $st): ?>
+                                    <option value="<?= $st['student_id'] ?>"><?= htmlspecialchars($st['full_name'].' ('.$st['roll_number'].')') ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Exam Type</label>
+                                <select name="exam_type" class="form-select">
+                                    <option value="midterm">Midterm</option>
+                                    <option value="final">Final</option>
+                                    <option value="quiz">Quiz</option>
+                                    <option value="assignment">Assignment</option>
+                                </select>
+                            </div>
+                            <div class="grid-2">
+                                <div class="form-group">
+                                    <label class="form-label">Marks Obtained</label>
+                                    <input type="number" name="marks_obtained" class="form-control" min="0" max="100" step="0.5" placeholder="0" required>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Total Marks</label>
+                                    <input type="number" name="total_marks" class="form-control" value="100" min="1" required>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Grade Letter</label>
+                                <select name="grade_letter" class="form-select">
+                                    <option value="">-- Auto --</option>
+                                    <option value="A+">A+</option>
+                                    <option value="A">A</option>
+                                    <option value="B+">B+</option>
+                                    <option value="B">B</option>
+                                    <option value="C">C</option>
+                                    <option value="D">D</option>
+                                    <option value="F">F</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Remarks</label>
+                                <textarea name="remarks" class="form-control" rows="2" placeholder="Optional remarks..." style="resize:vertical;"></textarea>
+                            </div>
+                            <button type="submit" class="btn-primary-glow"><i class="fa-solid fa-save"></i> Save Grade</button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Grades Table -->
+                <div class="glass-card">
+                    <div class="card-header-glass">
+                        <div class="card-title"><i class="fa-solid fa-list-check"></i> Grade Records</div>
+                    </div>
+                    <div class="table-container">
+                        <table class="table-glass">
+                            <thead><tr><th>Student</th><th>Subject</th><th>Type</th><th>Marks</th><th>Grade</th><th></th></tr></thead>
+                            <tbody>
+                            <?php if (empty($gradeRecords)): ?>
+                            <tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:2rem;">No grades entered yet.</td></tr>
+                            <?php else: ?>
+                            <?php foreach ($gradeRecords as $g): ?>
+                            <tr>
+                                <td>
+                                    <div style="font-size:0.88rem;"><?= htmlspecialchars($g['student_name']) ?></div>
+                                    <div style="font-size:0.74rem;color:var(--text-muted);"><?= htmlspecialchars($g['roll_number'] ?? '') ?></div>
+                                </td>
+                                <td><?= htmlspecialchars($g['subject_name']) ?></td>
+                                <td><span class="badge-glass badge-cyan"><?= ucfirst($g['exam_type']) ?></span></td>
+                                <td><?= $g['marks_obtained'] ?>/<?= $g['total_marks'] ?></td>
+                                <td><span class="badge-glass <?= $g['grade_letter'] === 'F' ? 'badge-red' : 'badge-green' ?>"><?= htmlspecialchars($g['grade_letter'] ?? '—') ?></span></td>
+                                <td>
+                                    <a href="actions/manage_records.php?action=delete_grade&id=<?= $g['id'] ?>&redirect=teacher_dashboard.php?section=grades&msg=grade_deleted"
+                                       class="btn-danger-glow btn-sm" data-confirm="Delete this grade?">
+                                        <i class="fa-solid fa-trash"></i>
+                                    </a>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                            <?php endif; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== MY STUDENTS ===== -->
+            <?php elseif ($section === 'students'): ?>
+            <div class="glass-card">
+                <div class="card-header-glass">
+                    <div class="card-title"><i class="fa-solid fa-users"></i> My Students</div>
+                    <span class="badge-glass badge-purple"><?= $totalMyStudents ?> students</span>
+                </div>
+                <div class="card-body-glass" style="padding-bottom:0.5rem;">
+                    <div class="search-input-wrap" style="margin-bottom:1rem;">
+                        <i class="fa-solid fa-search search-icon"></i>
+                        <input type="text" class="form-control" placeholder="Search students..." data-search="myStudentsTable">
+                    </div>
+                </div>
+                <div class="table-container">
+                    <table class="table-glass" id="myStudentsTable">
+                        <thead><tr><th>Name</th><th>Roll No</th><th>Class</th><th>Phone</th></tr></thead>
+                        <tbody>
+                        <?php if (empty($myStudents)): ?>
+                        <tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:2rem;">No students in your classes.</td></tr>
+                        <?php else: ?>
+                        <?php foreach ($myStudents as $st): ?>
+                        <tr>
+                            <td><?= htmlspecialchars($st['full_name']) ?></td>
+                            <td><span class="badge-glass badge-purple"><?= htmlspecialchars($st['roll_number']) ?></span></td>
+                            <td><?= htmlspecialchars($st['class_name']) ?></td>
+                            <td style="color:var(--text-muted);"><?= htmlspecialchars($st['phone'] ?? '—') ?></td>
+                        </tr>
+                        <?php endforeach; ?>
+                        <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <?php endif; ?>
+
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="js/main.js"></script>
+<script>
+function markAll(status) {
+    document.querySelectorAll('.att-status').forEach(sel => sel.value = status);
+}
+</script>
+</body>
+</html>
