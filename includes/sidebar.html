@@ -1,0 +1,92 @@
+<?php
+// Guard: must be logged in
+if (!isset($_SESSION['user_id'])) {
+    header('Location: ' . (isset($basePath) ? $basePath : '') . 'login.php');
+    exit;
+}
+
+$currentPage = basename($_SERVER['PHP_SELF'], '.php');
+$role = $_SESSION['role'];
+$userName = htmlspecialchars($_SESSION['full_name']);
+$initials  = strtoupper(substr($_SESSION['full_name'], 0, 1));
+
+// Helper for nav items
+function navItem($href, $icon, $label, $page, $current) {
+    $active = ($current === $page) ? ' active' : '';
+    echo "<a href=\"$href\" class=\"nav-item-link$active\">
+            <span class=\"nav-icon\"><i class=\"fa-solid $icon\"></i></span>
+            $label
+          </a>";
+}
+?>
+
+<!-- Sidebar Overlay (mobile) -->
+<div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+<!-- Sidebar -->
+<nav class="sidebar" id="sidebar">
+    <!-- Brand -->
+    <a href="<?= (isset($basePath) ? $basePath : '') ?>index.php" class="sidebar-brand">
+        <div class="brand-icon"><i class="fa-solid fa-graduation-cap"></i></div>
+        <div class="brand-text">
+            EduTrack
+            <span>School Management</span>
+        </div>
+    </a>
+
+    <!-- User Info -->
+    <div class="sidebar-user">
+        <div class="user-avatar"><?= $initials ?></div>
+        <div class="user-info">
+            <div class="user-name"><?= $userName ?></div>
+            <div class="user-role"><?= $role ?></div>
+        </div>
+    </div>
+
+    <!-- Navigation -->
+    <div class="sidebar-nav">
+
+        <?php if ($role === 'admin'): ?>
+        <div class="nav-section-title">Overview</div>
+        <?php navItem('admin_dashboard.php', 'fa-gauge-high', 'Dashboard', 'admin_dashboard', $currentPage); ?>
+
+        <div class="nav-section-title">Management</div>
+        <?php navItem('admin_dashboard.php?section=students', 'fa-user-graduate', 'Students', 'students', $currentPage); ?>
+        <?php navItem('admin_dashboard.php?section=teachers', 'fa-chalkboard-user', 'Teachers', 'teachers', $currentPage); ?>
+        <?php navItem('admin_dashboard.php?section=classes', 'fa-building-columns', 'Classes', 'classes', $currentPage); ?>
+        <?php navItem('admin_dashboard.php?section=subjects', 'fa-book-open', 'Subjects', 'subjects', $currentPage); ?>
+
+        <div class="nav-section-title">Academic</div>
+        <?php navItem('admin_dashboard.php?section=attendance', 'fa-clipboard-check', 'Attendance', 'attendance', $currentPage); ?>
+        <?php navItem('admin_dashboard.php?section=grades', 'fa-chart-bar', 'Grades', 'grades', $currentPage); ?>
+        <?php navItem('admin_dashboard.php?section=notices', 'fa-bullhorn', 'Notices', 'notices', $currentPage); ?>
+
+        <?php elseif ($role === 'teacher'): ?>
+        <div class="nav-section-title">Overview</div>
+        <?php navItem('teacher_dashboard.php', 'fa-gauge-high', 'Dashboard', 'teacher_dashboard', $currentPage); ?>
+
+        <div class="nav-section-title">Academic</div>
+        <?php navItem('teacher_dashboard.php?section=attendance', 'fa-clipboard-check', 'Mark Attendance', 'attendance', $currentPage); ?>
+        <?php navItem('teacher_dashboard.php?section=grades', 'fa-pen-to-square', 'Manage Grades', 'grades', $currentPage); ?>
+        <?php navItem('teacher_dashboard.php?section=students', 'fa-users', 'My Students', 'students', $currentPage); ?>
+
+        <?php elseif ($role === 'student'): ?>
+        <div class="nav-section-title">Overview</div>
+        <?php navItem('student_dashboard.php', 'fa-gauge-high', 'Dashboard', 'student_dashboard', $currentPage); ?>
+
+        <div class="nav-section-title">Academic</div>
+        <?php navItem('student_dashboard.php?section=attendance', 'fa-calendar-check', 'My Attendance', 'attendance', $currentPage); ?>
+        <?php navItem('student_dashboard.php?section=grades', 'fa-chart-line', 'My Grades', 'grades', $currentPage); ?>
+        <?php navItem('student_dashboard.php?section=notices', 'fa-bell', 'Notices', 'notices', $currentPage); ?>
+        <?php endif; ?>
+
+    </div>
+
+    <!-- Footer / Logout -->
+    <div class="sidebar-footer">
+        <a href="logout.php" class="logout-link">
+            <i class="fa-solid fa-right-from-bracket"></i>
+            Sign Out
+        </a>
+    </div>
+</nav>
