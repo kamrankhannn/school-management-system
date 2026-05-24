@@ -1,0 +1,240 @@
+<?php
+session_start();
+require_once '../config/db.php';
+
+// Auth guard
+if (!isset($_SESSION['user_id'])) {
+    header('Location: ../login.php'); exit;
+}
+
+$db     = getDB();
+$userId = $_SESSION['user_id'];
+$role   = $_SESSION['role'];
+
+$action   = $_POST['action'] ?? $_GET['action'] ?? '';
+$redirect = $_POST['redirect'] ?? $_GET['redirect'] ?? '../index.php';
+
+// Sanitize redirect to prevent open redirect
+if (!preg_match('/^[a-zA-Z0-9_.\-?=&\/]+$/', $redirect)) {
+    $redirect = '../index.php';
+}
+
+function doRedirect($redirect, $msg = null, $err = null) {
+    $sep = strpos($redirect, '?') !== false ? '&' : '?';
+    if ($msg) $redirect .= $sep . 'msg=' . urlencode($msg);
+    if ($err) $redirect .= $sep . 'err=' . urlencode($err);
+    header('Location: ../' . $redirect);
+    exit;
+}
+
+// ============================================================
+// ADMIN ONLY ACTIONS
+// ============================================================
+
+// ---- ADD STUDENT ----
+if ($action === 'add_student' && $role === 'admin') {
+    $full_name = trim($_POST['full_name'] ?? '');
+    $email     = trim($_POST['email'] ?? '');
+    $password  = $_POST['password'] ?? '';
+    $class_id  = intval($_POST['class_id'] ?? 0) ?: null;
+    $dob       = $_POST['date_of_birth'] ?? null;
+    $phone     = trim($_POST['phone'] ?? '');
+
+    if (empty($full_name) || empty($email) || empty($password)) {
+        doRedirect($redirect, null, 'invalid');
+    }
+
+    $check = $db->prepare("SELECT id FROM users WHERE email = ?");
+    $check->execute([$email]);
+    if ($check->fetch()) { doRedirect($redirect, null, 'email_exists'); }
+
+    $hashed = password_hash($password, PASSWORD_BCRYPT);
+    $db->prepare("INSERT INTO users (full_name, email, password, role) VALUES (?, ?, ?, 'student')")
+       ->execute([$full_name, $email, $hashed]);
+    $uid    = $db->lastInsertId();
+    $rollNo = 'STU-' . str_pad($uid, 4, '0', STR_PAD_LEFT);
+    $db->prepare("INSERT INTO students (user_id, roll_number, class_id, date_of_birth, phone) VALUES (?, ?, ?, ?, ?)")
+       ->execute([$uid, $rollNo, $class_id, $dob ?: null, $phone]);
+
+    doRedirect($redirect);
+}
+
+// ---- ADD TEACHER ----
+if ($action === 'add_teacher' && $role === 'admin') {
+    $full_name = trim($_POST['full_name'] ?? '');
+    $email     = trim($_POST['email'] ?? '');
+    $password  = $_POST['password'] ?? '';
+    $subject   = trim($_POST['subject'] ?? '');
+    $phone     = trim($_POST['phone'] ?? '');
+    $qual      = trim($_POST['qualification'] ?? '');
+
+    if (empty($full_name) || empty($email) || empty($password)) {
+        doRedirect($redirect, null, 'invalid');
+    }
+
+    $check = $db->prepare("SELECT id FROM users WHERE email = ?");
+    $check->execute([$email]);
+    if ($check->fetch()) { doRedirect($redirect, null, 'email_exists'); }
+
+    $hashed = password_hash($password, PASSWORD_BCRYPT);
+    $db->prepare("INSERT INTO users (full_name, email, password, role) VALUES (?, ?, ?, 'teacher')")
+       ->execute([$full_name, $email, $hashed]);
+    $uid   = $db->lastInsertId();
+    $empId = 'EMP-' . str_pad($uid, 4, '0', STR_PAD_LEFT);
+    $db->prepare("INSERT INTO teachers (user_id, employee_id, subject, phone, qualification) VALUES (?, ?, ?, ?, ?)")
+       ->execute([$uid, $empId, $subject, $phone, $qual]);
+
+    doRedirect($redirect);
+}
+
+// ---- DELETE USER (student or teacher) ----
+if ($action === 'delete_user' && $role === 'admin') {
+    $id = intval($_GET['id'] ?? 0);
+    if ($id) {
+        // Prevent self-deletion
+        if ($id === $userId) { doRedirect($redirect, null, 'invalid'); }
+        $db->prepare("DELETE FROM users WHERE id = ?")->execute([$id]);
+    }
+    doRedirect($redirect);
+}
+
+// ---- ADD CLASS ----
+if ($action === 'add_class' && $role === 'admin') {
+    $class_name = trim($_POST['class_name'] ?? '');
+    $section    = trim($_POST['section'] ?? '');
+    $teacher_id = intval($_POST['teacher_id'] ?? 0) ?: null;
+
+    if (empty($class_name) || empty($section)) { doRedirect($redirect, null, 'invalid'); }
+
+    $db->prepare("INSERT INTO classes (class_name, section, teacher_id) VALUES (?, ?, ?)")
+       ->execute([$class_name, $section, $teacher_id]);
+
+    doRedirect($redirect);
+}
+
+// ---- DELETE CLASS ----
+if ($action === 'delete_class' && $role === 'admin') {
+    $id = intval($_GET['id'] ?? 0);
+    if ($id) $db->prepare("DELETE FROM classes WHERE id = ?")->execute([$id]);
+    doRedirect($redirect);
+}
+
+// ---- ADD SUBJECT ----
+if ($action === 'add_subject' && $role === 'admin') {
+    $subject_name = trim($_POST['subject_name'] ?? '');
+    $class_id     = intval($_POST['class_id'] ?? 0);
+    $teacher_id   = intval($_POST['teacher_id'] ?? 0) ?: null;
+
+    if (empty($subject_name) || !$class_id) { doRedirect($redirect, null, 'invalid'); }
+
+    $db->prepare("INSERT INTO subjects (subject_name, class_id, teacher_id) VALUES (?, ?, ?)")
+       ->execute([$subject_name, $class_id, $teacher_id]);
+
+    doRedirect($redirect);
+}
+
+// ---- DELETE SUBJECT ----
+if ($action === 'delete_subject' && $role === 'admin') {
+    $id = intval($_GET['id'] ?? 0);
+    if ($id) $db->prepare("DELETE FROM subjects WHERE id = ?")->execute([$id]);
+    doRedirect($redirect);
+}
+
+// ---- ADD NOTICE ----
+if ($action === 'add_notice' && $role === 'admin') {
+    $title       = trim($_POST['title'] ?? '');
+    $content     = trim($_POST['content'] ?? '');
+    $target_role = $_POST['target_role'] ?? 'all';
+
+    if (empty($title) || empty($content)) { doRedirect($redirect, null, 'invalid'); }
+
+    $db->prepare("INSERT INTO notices (title, content, posted_by, target_role) VALUES (?, ?, ?, ?)")
+       ->execute([$title, $content, $userId, $target_role]);
+
+    doRedirect($redirect . '&msg=notice_added');
+}
+
+// ---- DELETE NOTICE ----
+if ($action === 'delete_notice' && $role === 'admin') {
+    $id = intval($_GET['id'] ?? 0);
+    if ($id) $db->prepare("DELETE FROM notices WHERE id = ?")->execute([$id]);
+    doRedirect($redirect);
+}
+
+// ============================================================
+// TEACHER ACTIONS
+// ============================================================
+
+// ---- SAVE ATTENDANCE ----
+if ($action === 'save_attendance' && $role === 'teacher') {
+    $class_id  = intval($_POST['class_id'] ?? 0);
+    $att_date  = $_POST['att_date'] ?? date('Y-m-d');
+    $attendance = $_POST['attendance'] ?? [];
+
+    if (!$class_id || empty($attendance)) { doRedirect($redirect, null, 'invalid'); }
+
+    // Validate date
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $att_date)) {
+        $att_date = date('Y-m-d');
+    }
+
+    $stmt = $db->prepare(
+        "INSERT INTO attendance (student_id, class_id, date, status, marked_by)
+         VALUES (?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE status = VALUES(status), marked_by = VALUES(marked_by)"
+    );
+
+    foreach ($attendance as $studentId => $status) {
+        $studentId = intval($studentId);
+        $status    = in_array($status, ['present', 'absent', 'late']) ? $status : 'present';
+        $stmt->execute([$studentId, $class_id, $att_date, $status, $userId]);
+    }
+
+    doRedirect($redirect);
+}
+
+// ---- ADD GRADE ----
+if ($action === 'add_grade' && $role === 'teacher') {
+    $subject_id     = intval($_POST['subject_id'] ?? 0);
+    $student_id     = intval($_POST['student_id'] ?? 0);
+    $marks_obtained = floatval($_POST['marks_obtained'] ?? 0);
+    $total_marks    = floatval($_POST['total_marks'] ?? 100);
+    $exam_type      = $_POST['exam_type'] ?? 'midterm';
+    $grade_letter   = trim($_POST['grade_letter'] ?? '');
+    $remarks        = trim($_POST['remarks'] ?? '');
+
+    if (!$subject_id || !$student_id) { doRedirect($redirect, null, 'invalid'); }
+
+    // Auto-calculate grade letter if not set
+    if (empty($grade_letter) && $total_marks > 0) {
+        $pct = ($marks_obtained / $total_marks) * 100;
+        if ($pct >= 90) $grade_letter = 'A+';
+        elseif ($pct >= 80) $grade_letter = 'A';
+        elseif ($pct >= 70) $grade_letter = 'B+';
+        elseif ($pct >= 60) $grade_letter = 'B';
+        elseif ($pct >= 50) $grade_letter = 'C';
+        elseif ($pct >= 40) $grade_letter = 'D';
+        else $grade_letter = 'F';
+    }
+
+    if (!in_array($exam_type, ['midterm', 'final', 'quiz', 'assignment'])) {
+        $exam_type = 'midterm';
+    }
+
+    $db->prepare(
+        "INSERT INTO grades (student_id, subject_id, marks_obtained, total_marks, grade_letter, exam_type, remarks)
+         VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )->execute([$student_id, $subject_id, $marks_obtained, $total_marks, $grade_letter, $exam_type, $remarks]);
+
+    doRedirect($redirect);
+}
+
+// ---- DELETE GRADE ----
+if ($action === 'delete_grade' && $role === 'teacher') {
+    $id = intval($_GET['id'] ?? 0);
+    if ($id) $db->prepare("DELETE FROM grades WHERE id = ?")->execute([$id]);
+    doRedirect($redirect);
+}
+
+// Fallback
+doRedirect('index.php');
